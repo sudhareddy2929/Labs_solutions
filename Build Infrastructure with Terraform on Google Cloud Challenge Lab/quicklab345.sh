@@ -78,9 +78,10 @@ EOF
 cat > ~/main.tf <<EOF
 terraform {
   backend "gcs" {
-    bucket = var.bucket_name
+    bucket = "tf-bucket-976669"
     prefix = "terraform/state"
   }
+}
 
   required_providers {
     google = {
