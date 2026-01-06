@@ -1,94 +1,64 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-# Given by you
+# ----------------------------
+# Fixed lab values (yours)
+# ----------------------------
 PROJECT_ID="qwiklabs-gcp-00-82abc45374f5"
-BUCKET_NAME="tf-bucket-976669"
-INSTANCE_NAME="tf-instance-908251"
-VPC_NAME="tf-vpc-678689"
-
-# Lab defaults (change if your lab says otherwise)
 REGION="us-central1"
 ZONE="us-central1-c"
+BUCKET_NAME="tf-bucket-976669"
+VPC_NAME="tf-vpc-678689"
 
-echo "Project: $PROJECT_ID"
-echo "Region:  $REGION"
-echo "Zone:    $ZONE"
-echo "Bucket:  $BUCKET_NAME"
-echo "VPC:     $VPC_NAME"
-echo "New VM:   $INSTANCE_NAME"
+# If your lab provides a required new instance name, set it here (optional)
+# INSTANCE_NAME="tf-instance-908251"
+INSTANCE_NAME="${INSTANCE_NAME:-tf-instance-new}"
 
-# Grab the existing 2 instance names so we can import properly
-# (Usually they are tf-instance-1 and tf-instance-2)
-EXISTING_NAMES=($(gcloud compute instances list --project "$PROJECT_ID" --format="value(name)" | head -n 2))
+export PROJECT_ID REGION ZONE BUCKET_NAME VPC_NAME INSTANCE_NAME
 
-if [ "${#EXISTING_NAMES[@]}" -lt 2 ]; then
-  echo "ERROR: Could not find 2 existing instances to import."
-  gcloud compute instances list --project "$PROJECT_ID"
-  exit 1
-fi
+gcloud auth list
 
-EXISTING_1="${EXISTING_NAMES[0]}"
-EXISTING_2="${EXISTING_NAMES[1]}"
+# ----------------------------
+# Create folders/files
+# ----------------------------
+mkdir -p ~/tf-lab/modules/instances ~/tf-lab/modules/storage
+cd ~/tf-lab
 
-echo "Existing instances detected: $EXISTING_1, $EXISTING_2"
+touch main.tf variables.tf
+touch modules/instances/instances.tf modules/instances/outputs.tf modules/instances/variables.tf
+touch modules/storage/storage.tf modules/storage/outputs.tf modules/storage/variables.tf
 
-cd ~
-rm -rf modules
-mkdir -p modules/instances modules/storage
-
-# -------------------------
+# ----------------------------
 # Root variables.tf
-# -------------------------
-cat > ~/variables.tf <<EOF
+# ----------------------------
+cat > variables.tf <<EOF
 variable "region" {
-  type    = string
-  default = "us-central1"
+  default = "$REGION"
 }
 
 variable "zone" {
-  type    = string
-  default = "us-central1-c"
+  default = "$ZONE"
 }
 
 variable "project_id" {
-  type    = string
   default = "$PROJECT_ID"
-}
-
-variable "bucket_name" {
-  type    = string
-  default = "$BUCKET_NAME"
-}
-
-variable "vpc_name" {
-  type    = string
-  default = "$VPC_NAME"
-}
-
-variable "instance_name" {
-  type    = string
-  default = "$INSTANCE_NAME"
 }
 EOF
 
-# -------------------------
-# Root main.tf
-# -------------------------
-cat > ~/main.tf <<EOF
+# ----------------------------
+# Root main.tf (providers + modules + backend)
+# Backend config passed via terraform init -backend-config
+# ----------------------------
+cat > main.tf <<EOF
 terraform {
-  backend "gcs" {
-    bucket = "tf-bucket-976669"
-    prefix = "terraform/state"
-  }
-}
-
   required_providers {
     google = {
       source  = "hashicorp/google"
       version = "4.53.0"
     }
   }
+
+  backend "gcs" {}
 }
 
 provider "google" {
@@ -97,125 +67,23 @@ provider "google" {
   zone    = var.zone
 }
 
-module "vpc" {
-  source  = "terraform-google-modules/network/google"
-  version = "~> 6.0.0"
-
-  project_id   = var.project_id
-  network_name = var.vpc_name
-  routing_mode = "GLOBAL"
-
-  subnets = [
-    {
-      subnet_name   = "subnet-01"
-      subnet_ip     = "10.10.10.0/24"
-      subnet_region = var.region
-    },
-    {
-      subnet_name           = "subnet-02"
-      subnet_ip             = "10.10.20.0/24"
-      subnet_region         = var.region
-      subnet_private_access = true
-      subnet_flow_logs      = true
-      description           = "Private subnet"
-    }
-  ]
-}
-
 module "instances" {
   source = "./modules/instances"
-
-  project_id     = var.project_id
-  region         = var.region
-  zone           = var.zone
-
-  network_self_link = module.vpc.network_self_link
-  subnet_01_name    = module.vpc.subnets_names[0]
-  subnet_02_name    = module.vpc.subnets_names[1]
-
-  existing_1_name = "$EXISTING_1"
-  existing_2_name = "$EXISTING_2"
-  new_name        = var.instance_name
 }
 
 module "storage" {
   source = "./modules/storage"
-
-  project_id   = var.project_id
-  region       = var.region
-  zone         = var.zone
-  bucket_name  = var.bucket_name
-}
-
-resource "google_compute_firewall" "tf_firewall" {
-  name    = "tf-firewall"
-  network = module.vpc.network_self_link
-
-  allow {
-    protocol = "tcp"
-    ports    = ["80"]
-  }
-
-  source_ranges = ["0.0.0.0/0"]
-  target_tags   = ["web"]
 }
 EOF
 
-# -------------------------
-# modules/instances/variables.tf
-# (Lab requirement: add region/zone/project_id here too)
-# -------------------------
-cat > ~/modules/instances/variables.tf <<EOF
-variable "region" {
-  type    = string
-  default = "us-central1"
-}
-
-variable "zone" {
-  type    = string
-  default = "us-central1-c"
-}
-
-variable "project_id" {
-  type = string
-}
-
-variable "network_self_link" {
-  type = string
-}
-
-variable "subnet_01_name" {
-  type = string
-}
-
-variable "subnet_02_name" {
-  type = string
-}
-
-variable "existing_1_name" {
-  type = string
-}
-
-variable "existing_2_name" {
-  type = string
-}
-
-variable "new_name" {
-  type = string
-}
-EOF
-
-# -------------------------
-# modules/instances/instances.tf
-# - Manage 2 existing instances (for import) + 1 new instance
-# - Use var.zone (fixes your zone error)
-# - Attach to correct subnet names
-# -------------------------
-cat > ~/modules/instances/instances.tf <<EOF
+# ----------------------------
+# Instances module
+# ----------------------------
+cat > modules/instances/instances.tf <<EOF
 resource "google_compute_instance" "tf-instance-1" {
-  name         = var.existing_1_name
+  name         = "tf-instance-1"
   machine_type = "e2-standard-2"
-  zone         = var.zone
+  zone         = "$ZONE"
 
   boot_disk {
     initialize_params {
@@ -224,18 +92,25 @@ resource "google_compute_instance" "tf-instance-1" {
   }
 
   network_interface {
-    network    = var.network_self_link
-    subnetwork = var.subnet_01_name
+    network = "default"
   }
 
-  tags = ["web"]
+  metadata_startup_script = <<-EOT
+#!/bin/bash
+EOT
+
   allow_stopping_for_update = true
+
+  # IMPORTANT: these are imported, so don't try to "fix" them
+  lifecycle {
+    ignore_changes = all
+  }
 }
 
 resource "google_compute_instance" "tf-instance-2" {
-  name         = var.existing_2_name
+  name         = "tf-instance-2"
   machine_type = "e2-standard-2"
-  zone         = var.zone
+  zone         = "$ZONE"
 
   boot_disk {
     initialize_params {
@@ -244,18 +119,25 @@ resource "google_compute_instance" "tf-instance-2" {
   }
 
   network_interface {
-    network    = var.network_self_link
-    subnetwork = var.subnet_02_name
+    network = "default"
   }
 
-  tags = ["web"]
+  metadata_startup_script = <<-EOT
+#!/bin/bash
+EOT
+
   allow_stopping_for_update = true
+
+  lifecycle {
+    ignore_changes = all
+  }
 }
 
+# Optional: create a new instance (if your lab needs it)
 resource "google_compute_instance" "new_instance" {
-  name         = var.new_name
+  name         = "$INSTANCE_NAME"
   machine_type = "e2-standard-2"
-  zone         = var.zone
+  zone         = "$ZONE"
 
   boot_disk {
     initialize_params {
@@ -264,62 +146,55 @@ resource "google_compute_instance" "new_instance" {
   }
 
   network_interface {
-    network    = var.network_self_link
-    subnetwork = var.subnet_01_name
+    network = "default"
   }
 
-  tags = ["web"]
+  metadata_startup_script = <<-EOT
+#!/bin/bash
+EOT
+
   allow_stopping_for_update = true
 }
 EOF
 
-# -------------------------
-# modules/storage/variables.tf
-# (Lab requirement: add region/zone/project_id here too)
-# -------------------------
-cat > ~/modules/storage/variables.tf <<EOF
-variable "region" {
-  type    = string
-  default = "us-central1"
-}
-
-variable "zone" {
-  type    = string
-  default = "us-central1-c"
-}
-
-variable "project_id" {
-  type = string
-}
-
-variable "bucket_name" {
-  type = string
-}
-EOF
-
-# -------------------------
-# modules/storage/storage.tf
-# -------------------------
-cat > ~/modules/storage/storage.tf <<EOF
-resource "google_storage_bucket" "storage_bucket" {
-  name          = var.bucket_name
-  location      = var.region
+# ----------------------------
+# Storage module
+# ----------------------------
+cat > modules/storage/storage.tf <<EOF
+resource "google_storage_bucket" "storage-bucket" {
+  name          = "$BUCKET_NAME"
+  location      = "US"
   force_destroy = true
   uniform_bucket_level_access = true
 }
 EOF
 
-# -------------------------
-# Terraform init + imports + apply
-# -------------------------
-cd ~
-terraform init
+# ----------------------------
+# Terraform init (backend config here)
+# ----------------------------
+terraform fmt -recursive
 
-# Import the two existing instances using full resource path (most reliable)
-terraform import "module.instances.google_compute_instance.tf-instance-1" "projects/$PROJECT_ID/zones/$ZONE/instances/$EXISTING_1"
-terraform import "module.instances.google_compute_instance.tf-instance-2" "projects/$PROJECT_ID/zones/$ZONE/instances/$EXISTING_2"
+terraform init -reconfigure \
+  -backend-config="bucket=$BUCKET_NAME" \
+  -backend-config="prefix=terraform/state"
 
+terraform validate
+
+# ----------------------------
+# Import existing instances (correct import IDs)
+# ----------------------------
+terraform import "module.instances.google_compute_instance.tf-instance-1" "$PROJECT_ID/$ZONE/tf-instance-1"
+terraform import "module.instances.google_compute_instance.tf-instance-2" "$PROJECT_ID/$ZONE/tf-instance-2"
+
+# ----------------------------
+# Plan + Apply
+# ----------------------------
 terraform plan
 terraform apply --auto-approve
 
+echo
 echo "DONE ✅"
+echo "Imported: tf-instance-1, tf-instance-2"
+echo "Backend bucket: $BUCKET_NAME"
+echo "VPC name (not used in this script): $VPC_NAME"
+echo "New instance (if created): $INSTANCE_NAME"
